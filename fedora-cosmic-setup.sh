@@ -35,11 +35,44 @@ OK=(); FAILED=(); SKIPPED=()
 
 # ---------------------------------------------------------------- utilità ----
 C_R=$'\e[31m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_B=$'\e[34m'; C_0=$'\e[0m'
+C_M=$'\e[95m'; C_C=$'\e[96m'; C_BD=$'\e[1m'; C_DIM=$'\e[2m'
+STEP_I=0; STEP_N=${#STEPS[@]}
 info() { echo "${C_B}[i]${C_0} $*"; }
 ok()   { echo "${C_G}[ok]${C_0} $*"; }
 warn() { echo "${C_Y}[!]${C_0} $*" >&2; }
 err()  { echo "${C_R}[x]${C_0} $*" >&2; }
 die()  { err "$*"; exit 1; }
+
+banner() {
+  echo "${C_C}${C_BD}"
+  cat <<'ART'
+ _____ _____ ____   ___  ____      _
+|  ___| ____|  _ \ / _ \|  _ \    / \
+| |_  |  _| | | | | | | | |_) |  / _ \
+|  _| | |___| |_| | |_| |  _ <  / ___ \
+|_|   |_____|____/ \___/|_| \_\/_/   \_\
+ART
+  echo "${C_M}"
+  cat <<'ART'
+  ____ ___  ____  __  __ ___ ____
+ / ___/ _ \/ ___||  \/  |_ _/ ___|
+| |  | | | \___ \| |\/| || | |
+| |__| |_| |___) | |  | || | |___
+ \____\___/|____/|_|  |_|___\____|
+ART
+  echo "${C_0}${C_DIM}            S E T U P   A U T O M A T I C O${C_0}"
+  echo
+}
+
+progress_bar() { # progress_bar fatti totale [etichetta]
+  local done=$1 total=$2 label=${3:-} width=30 filled pct i bar=""
+  (( total > 0 )) || total=1
+  filled=$(( done * width / total )); pct=$(( done * 100 / total ))
+  for ((i = 0; i < width; i++)); do
+    if (( i < filled )); then bar+="█"; else bar+="░"; fi
+  done
+  echo "${C_C}[${C_G}${bar}${C_C}]${C_0} ${C_BD}${pct}%${C_0} (${done}/${total}) ${label}"
+}
 
 retry() { # retry N comando...
   local n=$1 i; shift
@@ -94,11 +127,14 @@ skip_step() {
 
 run_step() {
   local name=$1 fn="step_${1//-/_}" rc
+  STEP_I=$((STEP_I + 1))
   if skip_step "$name"; then SKIPPED+=("$name"); return 0; fi
   if [[ -f $STATE_DIR/$name.done && $FORCE -ne 1 ]]; then
     SKIPPED+=("$name (già fatto)"); return 0
   fi
-  echo; info "==================== $name ===================="
+  echo
+  progress_bar $((STEP_I - 1)) "$STEP_N" "${C_DIM}in corso:${C_0} ${C_M}${C_BD}$name${C_0}"
+  info "${C_BD}==================== $name ====================${C_0}"
   set +e
   ( set -Eeuo pipefail; trap 'warn "errore riga $LINENO: $BASH_COMMAND"' ERR; "$fn" )
   rc=$?
@@ -724,8 +760,10 @@ main() {
 
   [[ $EUID -eq 0 ]] || die "esegui come root:  curl -fsSL URL | sudo bash"
   mkdir -p "$(dirname "$LOG")"
+  if [[ ! -t 1 ]]; then C_R=""; C_G=""; C_Y=""; C_B=""; C_0=""; C_M=""; C_C=""; C_BD=""; C_DIM=""; fi
   exec > >(tee -a "$LOG") 2>&1
   trap cleanup EXIT
+  banner
   trap 'err "interrotto"; exit 130' INT TERM
 
   info "fedora-cosmic-setup $(date '+%F %T')"
@@ -734,7 +772,8 @@ main() {
   local s
   for s in "${STEPS[@]}"; do run_step "$s"; done
 
-  echo; info "==================== RIEPILOGO ===================="
+  echo; progress_bar "$STEP_N" "$STEP_N" "${C_G}${C_BD}finito${C_0}"
+  info "${C_BD}==================== RIEPILOGO ====================${C_0}"
   (( ${#OK[@]} ))      && ok   "completati: ${OK[*]}"
   (( ${#SKIPPED[@]} )) && info "saltati:    ${SKIPPED[*]}"
   (( ${#FAILED[@]} ))  && err  "FALLITI:    ${FAILED[*]}   (rilancia con --only=nome --force)"
