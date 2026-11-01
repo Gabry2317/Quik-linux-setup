@@ -15,7 +15,7 @@
 #    --list         mostra gli step
 #  Variabili: TARGET_USER, GRUB_THEME_URL (link diretto allo zip/tar del tema)
 #
-#  Step (in ordine): repos cosmic remove-de audio gnome-apps backup shell
+#  Step (in ordine): repos system cosmic remove-de audio gnome-apps backup shell
 #                    devtools browser grub network
 # =============================================================================
 set -Eeuo pipefail
@@ -23,7 +23,7 @@ set -Eeuo pipefail
 LOG=/var/log/fedora-cosmic-setup.log
 STATE_DIR=/var/lib/fedora-cosmic-setup
 BACKUP_DIR=/var/backups/fedora-cosmic-setup/$(date +%Y%m%d-%H%M%S)
-STEPS=(repos cosmic remove-de audio gnome-apps backup shell devtools browser grub network)
+STEPS=(repos system cosmic remove-de audio gnome-apps backup shell devtools browser grub network)
 
 GRUB_THEME_ID="${GRUB_THEME_ID:-2377285}"
 GRUB_THEME_URL="${GRUB_THEME_URL:-}"
@@ -183,6 +183,31 @@ step_repos() {
   ok "repository pronti"
 }
 
+# ============================ ORA (dual boot Windows) + SUDO PASSWORD ========
+step_system() {
+  # --- orario: Linux e Windows leggono l'orologio hardware in modo diverso.
+  # Metto l'RTC in "ora locale" (come Windows) cosi' l'ora non sballa tra i due sistemi.
+  timedatectl set-ntp true 2>/dev/null || warn "impossibile attivare la sincronizzazione NTP"
+  if timedatectl set-local-rtc 1 --adjust-system-clock 2>/dev/null; then
+    ok "orologio hardware in ora locale (compatibile con Windows)"
+  else
+    warn "impossibile impostare l'RTC in ora locale"
+  fi
+  info "fuso orario attuale: $(timedatectl show -p Timezone --value 2>/dev/null || echo ?)"
+
+  # --- sudo: mostra gli asterischi mentre scrivi la password
+  local f=/etc/sudoers.d/90-pwfeedback
+  backup_file "$f"
+  printf 'Defaults pwfeedback\n' > "$TMP/pwfeedback"
+  if visudo -cf "$TMP/pwfeedback" >/dev/null; then       # valido PRIMA di installare, per non rompere sudo
+    install -m 0440 -o root -g root "$TMP/pwfeedback" "$f"
+    visudo -c >/dev/null || { rm -f "$f"; die "sudoers non valido, modifica annullata"; }
+    ok "sudo mostra gli asterischi (pwfeedback)"
+  else
+    die "regola sudoers non valida, non la installo"
+  fi
+}
+
 # ================================================================ 2) COSMIC ===
 step_cosmic() {
   local g done=0
@@ -209,7 +234,10 @@ step_cosmic() {
   done
   systemctl enable --force cosmic-greeter.service
   systemctl set-default graphical.target
-  ok "COSMIC installato, cosmic-greeter abilitato"
+  # schermata di login = quella di COSMIC (cosmic-greeter): controllo che sia davvero lei il display manager
+  local dmtarget; dmtarget=$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)
+  [[ $dmtarget == *cosmic-greeter* ]] || warn "display-manager.service punta a '${dmtarget:-nulla}', non a cosmic-greeter"
+  ok "COSMIC installato, login = cosmic-greeter"
 }
 
 # ====================================================== 6) RIMUOVI ALTRI DE ===
