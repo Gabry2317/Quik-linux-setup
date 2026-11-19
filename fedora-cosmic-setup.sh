@@ -13,20 +13,18 @@
 #    --yes | -y     niente conto alla rovescia prima di rimuovere i DE
 #    --reboot       riavvia alla fine
 #    --list         mostra gli step
-#  Variabili: TARGET_USER, GRUB_THEME_URL (link diretto allo zip/tar del tema)
+#  Variabili: TARGET_USER, WALLPAPER (percorso dell'immagine di sfondo per xfdesktop)
 #
-#  Step (in ordine): repos system cosmic remove-de audio gnome-apps backup shell
-#                    devtools browser grub network
+#  Step (in ordine): repos system cosmic audio gnome-apps backup shell devtools
+#                    desktop theme remove-de
 # =============================================================================
 set -Eeuo pipefail
 
 LOG=/var/log/fedora-cosmic-setup.log
 STATE_DIR=/var/lib/fedora-cosmic-setup
 BACKUP_DIR=/var/backups/fedora-cosmic-setup/$(date +%Y%m%d-%H%M%S)
-STEPS=(repos system cosmic remove-de audio gnome-apps backup shell devtools browser grub network)
+STEPS=(repos system cosmic audio gnome-apps backup shell devtools desktop theme remove-de)
 
-GRUB_THEME_ID="${GRUB_THEME_ID:-2377285}"
-GRUB_THEME_URL="${GRUB_THEME_URL:-}"
 SKIP="${SKIP:-}"; ONLY="${ONLY:-}"; FORCE=0; ASSUME_YES=0; DO_REBOOT=0
 TARGET_USER="${TARGET_USER:-}"; TARGET_HOME=""
 SKIPFLAG=""
@@ -155,7 +153,7 @@ preflight() {
   [[ ${ID:-} == fedora || ${ID_LIKE:-} == *fedora* ]] || die "distro non supportata (serve Fedora o derivata)"
   [[ -e /run/ostree-booted ]] && die "sistema atomic/ostree (Silverblue, Kinoite...) non supportato"
   command -v dnf >/dev/null || die "dnf non trovato"
-  [[ $(uname -m) == x86_64 ]] || warn "architettura $(uname -m): alcuni step (Helium, GRUB) potrebbero non funzionare"
+  [[ $(uname -m) == x86_64 ]] || warn "architettura $(uname -m): alcuni step potrebbero non funzionare"
 
   local free_gb boot_mb
   free_gb=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
@@ -276,60 +274,6 @@ step_cosmic() {
   ok "COSMIC installato, login = cosmic-greeter"
 }
 
-# ====================================================== 6) RIMUOVI ALTRI DE ===
-de_packages() { # nomi dei pacchetti installati che combaciano con i glob
-  rpm -qa --qf '%{NAME}\n' "$@" 2>/dev/null | sort -u \
-    | grep -vE '^(cosmic-.*|xdg-desktop-portal-cosmic|kernel.*|plasma-wayland-protocols|.*-devel)$' || true
-}
-
-remove_family() {
-  local label=$1; shift
-  local list=()
-  mapfile -t list < <(de_packages "$@")
-  (( ${#list[@]} )) || { info "$label: nessun pacchetto installato"; return 0; }
-  info "$label: rimuovo ${#list[@]} pacchetti"
-  wait_pkg_lock
-  retry 2 dnf -y remove --setopt=clean_requirements_on_remove=False "${list[@]}" \
-    || warn "$label: rimozione non completata (probabile dipendenza protetta), proseguo"
-}
-
-step_remove_de() {
-  rpm -q cosmic-session cosmic-greeter &>/dev/null \
-    || die "COSMIC non installato: non rimuovo nessun altro DE"
-  systemctl is-enabled cosmic-greeter.service &>/dev/null \
-    || die "cosmic-greeter non abilitato: non rimuovo nessun altro DE"
-
-  # dnf si rifiuta di rimuovere ciò che romperebbe COSMIC o il sistema
-  mkdir -p /etc/dnf/protected.d
-  printf '%s\n' cosmic-session cosmic-greeter cosmic-comp cosmic-settings cosmic-files cosmic-term \
-    NetworkManager pipewire wireplumber flatpak sudo > /etc/dnf/protected.d/cosmic-setup.conf
-
-  if [[ $ASSUME_YES -ne 1 ]]; then
-    warn "Sto per RIMUOVERE GNOME, KDE Plasma, Xfce, MATE, Cinnamon, LXQt/LXDE, Budgie, Deepin, Pantheon."
-    warn "Meglio da una TTY (Ctrl+Alt+F3). Ctrl+C entro 10 secondi per annullare."
-    for i in {10..1}; do printf '%s ' "$i"; sleep 1; done; echo
-  fi
-
-  remove_family "GNOME" gnome-shell 'gnome-shell-extension-*' gdm gnome-session 'gnome-session-*' mutter \
-    gnome-control-center gnome-initial-setup gnome-classic-session gnome-tour gnome-browser-connector \
-    nautilus gnome-terminal gnome-console gnome-text-editor gnome-software
-  remove_family "KDE Plasma" 'plasma-*' 'kwin*' 'sddm*' 'kde-settings*' kdeplasma-addons dolphin konsole \
-    kate kscreen kinfocenter 'kdeconnect*' kde-gtk-config
-  remove_family "Xfce" 'xfce4-*' xfwm4 xfdesktop thunar Thunar lightdm 'lightdm-*'
-  remove_family "MATE" 'mate-*' caja 'caja-*' marco mozo
-  remove_family "Cinnamon" cinnamon 'cinnamon-*' nemo 'nemo-*' muffin cjs
-  remove_family "LXQt/LXDE" 'lxqt-*' 'lxde-*' lxsession pcmanfm pcmanfm-qt lxdm
-  remove_family "Budgie" 'budgie-*'
-  remove_family "Deepin" 'deepin-*' 'dde-*'
-  remove_family "Pantheon" 'pantheon-*'
-
-  info "Window manager puri (Hyprland, i3, Sway, Openbox) NON toccati."
-  # ricontrollo che COSMIC sia ancora integro
-  rpm -q cosmic-session cosmic-greeter &>/dev/null || die "COSMIC danneggiato dalla rimozione! Reinstallalo: dnf group install cosmic-desktop-environment"
-  systemctl enable --force cosmic-greeter.service
-  ok "altri DE rimossi"
-}
-
 # ============================================================== 3) AUDIO ======
 step_audio() {
   pkgs pipewire wireplumber pipewire-alsa pipewire-pulseaudio alsa-utils pavucontrol
@@ -398,63 +342,6 @@ step_shell() {
   pkgs kitty zsh zsh-autosuggestions zsh-syntax-highlighting zsh-completions fzf git \
        jetbrains-mono-fonts-all fontconfig util-linux-user starship tldr
   local ts; ts=$(date +%s)
-  mkdir -p "$TARGET_HOME/.config/kitty"
-
-  [[ -e $TARGET_HOME/.config/kitty/kitty.conf ]] && cp -a "$TARGET_HOME/.config/kitty/kitty.conf" "$TARGET_HOME/.config/kitty/kitty.conf.bak-$ts"
-  cat > "$TARGET_HOME/.config/kitty/kitty.conf" <<'EOF'
-# --- Kitty: tema Dracula + animazioni ---
-font_family      JetBrains Mono
-font_size        12.0
-shell            zsh
-scrollback_lines 20000
-enable_audio_bell no
-confirm_os_window_close 0
-window_padding_width 8
-remember_window_size yes
-
-# trasparenza + blur
-background_opacity 0.88
-background_blur    32
-
-# cursore animato (scia) e lampeggio morbido
-cursor_shape beam
-cursor_blink_interval 0.5 ease-in-out
-cursor_trail 3
-cursor_trail_decay 0.1 0.4
-
-# tab bar
-tab_bar_style powerline
-tab_powerline_style slanted
-
-# --- Dracula ---
-foreground #f8f8f2
-background #282a36
-selection_foreground #ffffff
-selection_background #44475a
-url_color #8be9fd
-cursor #f8f8f2
-color0  #21222c
-color8  #6272a4
-color1  #ff5555
-color9  #ff6e6e
-color2  #50fa7b
-color10 #69ff94
-color3  #f1fa8c
-color11 #ffffa5
-color4  #bd93f9
-color12 #d6acff
-color5  #ff79c6
-color13 #ff92df
-color6  #8be9fd
-color14 #a4ffff
-color7  #f8f8f2
-color15 #ffffff
-active_tab_foreground   #282a36
-active_tab_background   #bd93f9
-inactive_tab_foreground #f8f8f2
-inactive_tab_background #44475a
-EOF
-
   if [[ -e $TARGET_HOME/.zshrc ]] && ! grep -q 'fedora-cosmic-setup' "$TARGET_HOME/.zshrc"; then
     cp -a "$TARGET_HOME/.zshrc" "$TARGET_HOME/.zshrc.bak-$ts"
   fi
@@ -519,11 +406,11 @@ ZSH_AUTOSUGGEST_STRATEGY=(history completion)
 [[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]] && source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
 [[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]] && source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 EOF
-  chown -R "$TARGET_USER": "$TARGET_HOME/.config/kitty" "$TARGET_HOME/.zshrc"
+  chown "$TARGET_USER:" "$TARGET_HOME/.zshrc"
 
   if [[ -x /usr/bin/zsh ]]; then usermod -s /usr/bin/zsh "$TARGET_USER" || warn "impossibile impostare zsh come shell"; fi
   fc-cache -f >/dev/null 2>&1 || true
-  ok "kitty (Dracula, trasparenza, scia cursore) + zsh (suggerimenti, completamento, cronologia, fzf)"
+  ok "kitty + zsh (suggerimenti, completamento, cronologia, fzf)"
 }
 
 # ============================================================ 8) VS CODE ======
@@ -564,178 +451,342 @@ EOF
   ok "VS Code + C/C++, Python, Rust, Java, Go, Node"
 }
 
-# ============================================== 9) FIREFOX -> HELIUM ==========
-install_helium_tarball() {
-  local url dir bin
-  url=$(curl -fsSL https://api.github.com/repos/imputnet/helium-linux/releases/latest \
-    | python3 -c 'import sys,json
-for a in json.load(sys.stdin)["assets"]:
-    if a["name"].endswith("x86_64_linux.tar.xz"): print(a["browser_download_url"]); break') || true
-  [[ -n $url ]] || return 1
-  retry 3 curl -fL --max-time 600 -o "$TMP/helium.tar.xz" "$url" || return 1
-  dir=/opt/helium; rm -rf "$dir"; mkdir -p "$dir"
-  tar -xJf "$TMP/helium.tar.xz" -C "$dir" --strip-components=1 || return 1
-  bin=$(find "$dir" -maxdepth 1 -type f -executable \( -name helium -o -name chrome \) | head -1)
-  [[ -n $bin ]] || return 1
-  ln -sf "$bin" /usr/local/bin/helium
-  [[ -f $dir/chrome-sandbox ]] && chmod 4755 "$dir/chrome-sandbox" || true
-  [[ -f $dir/helium.desktop ]] && install -Dm644 "$dir/helium.desktop" /usr/share/applications/helium.desktop
-  return 0
+# ================= XFDESKTOP (icone sul desktop) + PAPIRUS ====================
+find_wallpaper() {  # $WALLPAPER > immagine "papirus" trovata nel sistema > sfondo di default
+  local w=""
+  if [[ -n ${WALLPAPER:-} && -f $WALLPAPER ]]; then echo "$WALLPAPER"; return 0; fi
+  w=$(find /usr/share/backgrounds /usr/share/wallpapers "$TARGET_HOME/Pictures" "$TARGET_HOME/.local/share/backgrounds" \
+        -type f -iname '*pap[iy]rus*' \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+        2>/dev/null | head -1 || true)
+  if [[ -z $w ]]; then
+    w=$(find /usr/share/backgrounds -type f \( -iname '*.jpg' -o -iname '*.png' -o -iname '*.webp' \) \
+          2>/dev/null | head -1 || true)
+  fi
+  echo "$w"
 }
 
-step_browser() {
-  # installo Helium PRIMA di togliere Firefox: non resti mai senza browser
-  local helium_ok=0
-  if retry 2 dnf -y copr enable imput/helium && retry 2 dnf -y install helium-bin; then
-    helium_ok=1
-  else
-    warn "COPR non disponibile, provo il tarball ufficiale da GitHub"
-    install_helium_tarball && helium_ok=1
-  fi
-  [[ $helium_ok -eq 1 ]] || die "Helium non installato: lascio Firefox al suo posto"
-
-  wait_pkg_lock
-  rpm -qa 'firefox*' | grep -q . && dnf -y remove 'firefox*' --setopt=clean_requirements_on_remove=False \
-    || info "Firefox (rpm) non presente"
-  flatpak list --system --app 2>/dev/null | grep -q org.mozilla.firefox \
-    && flatpak uninstall --system -y --noninteractive org.mozilla.firefox || true
-
-  if [[ -n $TARGET_USER ]]; then
-    local desk=helium.desktop
-    [[ -f /usr/share/applications/$desk ]] || desk=$(basename "$(ls /usr/share/applications/helium*.desktop 2>/dev/null | head -1)")
-    [[ -n $desk ]] && run_as_user xdg-settings set default-web-browser "$desk" 2>/dev/null \
-      || warn "imposta Helium come browser predefinito dalle impostazioni di COSMIC"
-  fi
-  ok "Helium installato, Firefox rimosso"
-}
-
-# ====================================================== 1) TEMA GRUB ==========
-step_grub() {
-  command -v grub2-mkconfig >/dev/null || pkgs grub2-tools
-  command -v grub2-mkconfig >/dev/null || die "grub2-mkconfig non disponibile (sistema senza GRUB?)"
-  pkgs python3 curl
-
-  local url="$GRUB_THEME_URL" meta=""
-  if [[ -z $url ]]; then
-    meta=$(curl -fsSL --max-time 30 "https://www.gnome-look.org/ocs/v1/content/data/${GRUB_THEME_ID}?format=json" 2>/dev/null || true)
-    url=$(printf '%s' "$meta" | python3 -c '
-import sys, json
-def walk(o):
-    if isinstance(o, dict):
-        for k, v in o.items():
-            if k == "downloadlink1" and isinstance(v, str) and v:
-                print(v); raise SystemExit
-            walk(v)
-    elif isinstance(o, list):
-        for i in o: walk(i)
-try: walk(json.load(sys.stdin))
-except SystemExit: pass
-except Exception: pass' || true)
-    if [[ -z $url ]]; then   # fallback XML
-      meta=$(curl -fsSL --max-time 30 "https://www.gnome-look.org/ocs/v1/content/data/${GRUB_THEME_ID}" 2>/dev/null || true)
-      url=$(grep -oP '(?<=<downloadlink1>)[^<]+' <<<"$meta" | head -1 | sed 's/&amp;/\&/g' || true)
+set_gtk_icon_theme() {  # $1 = nome tema
+  local d file key=gtk-icon-theme-name
+  for d in gtk-3.0 gtk-4.0; do
+    file=$TARGET_HOME/.config/$d/settings.ini
+    mkdir -p "$(dirname "$file")"
+    backup_file "$file"
+    if [[ ! -e $file ]]; then
+      printf '[Settings]\n%s=%s\n' "$key" "$1" > "$file"
+    elif grep -q "^$key=" "$file"; then
+      sed -i "s|^$key=.*|$key=$1|" "$file"
+    elif grep -q '^\[Settings\]' "$file"; then
+      sed -i "/^\[Settings\]/a $key=$1" "$file"
+    else
+      printf '\n[Settings]\n%s=%s\n' "$key" "$1" >> "$file"
     fi
-  fi
-  [[ -n $url ]] || die "link del tema non ricavato dall'API di gnome-look. Rilancia con GRUB_THEME_URL=<link diretto allo zip>"
-
-  info "scarico il tema: $url"
-  retry 3 curl -fL --max-time 300 -o "$TMP/theme.bin" "$url" || die "download del tema fallito"
-  [[ $(stat -c %s "$TMP/theme.bin") -gt 10000 ]] || die "file scaricato troppo piccolo"
-  head -c 200 "$TMP/theme.bin" | grep -qi '<html' && die "ho scaricato una pagina HTML invece del tema (usa GRUB_THEME_URL)"
-
-  mkdir -p "$TMP/theme"
-  python3 - "$TMP/theme.bin" "$TMP/theme" <<'PY' || die "archivio del tema non riconosciuto"
-import shutil, sys
-for fmt in ("zip", "gztar", "xztar", "bztar", "tar"):
-    try:
-        shutil.unpack_archive(sys.argv[1], sys.argv[2], fmt); sys.exit(0)
-    except Exception:
-        pass
-sys.exit(1)
-PY
-  local tfile tdir tname
-  tfile=$(find "$TMP/theme" -name theme.txt | head -1)
-  [[ -n $tfile ]] || die "theme.txt non trovato nell'archivio"
-  [[ $(find "$TMP/theme" -name theme.txt | wc -l) -gt 1 ]] && warn "più varianti nel tema, uso: $tfile"
-  tdir=$(dirname "$tfile")
-  tname=$(basename "$tdir" | tr -c 'A-Za-z0-9._-\n' '_')
-  [[ $tname == "theme" || -z $tname ]] && tname="custom-theme-$GRUB_THEME_ID"
-
-  mkdir -p /boot/grub2/themes
-  rm -rf "/boot/grub2/themes/$tname"
-  cp -a "$tdir" "/boot/grub2/themes/$tname"
-
-  backup_file /etc/default/grub
-  sed -i -e '/^GRUB_THEME=/d' -e '/^GRUB_TERMINAL_OUTPUT=/d' -e '/^GRUB_TERMINAL=/d' /etc/default/grub
-  {
-    echo 'GRUB_TERMINAL_OUTPUT="gfxterm"'
-    echo "GRUB_THEME=\"/boot/grub2/themes/$tname/theme.txt\""
-  } >> /etc/default/grub
-  grep -q '^GRUB_GFXMODE=' /etc/default/grub || echo 'GRUB_GFXMODE=auto' >> /etc/default/grub
-
-  # genero in un file temporaneo, controllo, e solo dopo sostituisco il vero grub.cfg
-  local cfg; cfg=$(readlink -f /etc/grub2.cfg 2>/dev/null || echo /boot/grub2/grub.cfg)
-  [[ -e $cfg ]] || cfg=/boot/grub2/grub.cfg
-  if ! grub2-mkconfig -o "$TMP/grub.cfg"; then
-    cp -a "$BACKUP_DIR/etc/default/grub" /etc/default/grub; die "grub2-mkconfig fallito, ripristinato /etc/default/grub"
-  fi
-  if command -v grub2-script-check >/dev/null && ! grub2-script-check "$TMP/grub.cfg"; then
-    cp -a "$BACKUP_DIR/etc/default/grub" /etc/default/grub; die "grub.cfg generato non valido, ripristinato /etc/default/grub"
-  fi
-  grep -q "themes/$tname/theme.txt" "$TMP/grub.cfg" || warn "il tema non compare nel grub.cfg generato"
-  backup_file "$cfg"
-  cp -f "$TMP/grub.cfg" "$cfg"
-  ok "tema GRUB '$tname' installato (se ne usi uno dinamico per voce, resta compatibile)"
+    chown -R "$TARGET_USER:" "$TARGET_HOME/.config/$d"
+  done
 }
 
-# ================================================== 10) OTTIMIZZAZIONI RETE ===
-step_network() {
-  modprobe tcp_bbr 2>/dev/null || true
-  local cc=""
-  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-    cc=$'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr'
-    echo tcp_bbr > /etc/modules-load.d/tcp_bbr.conf
+step_desktop() {
+  need_user
+  pkgs papirus-icon-theme xfdesktop thunar xfconf gtk-layer-shell wlr-randr dbus-tools
+  rpm -q papirus-icon-theme &>/dev/null || warn "papirus-icon-theme non installato"
+  command -v xfdesktop >/dev/null || [[ -x $TARGET_HOME/.local/bin/xfdesktop ]] \
+    || die "xfdesktop non disponibile"
+
+  # --- Papirus: icone per xfdesktop (GTK) e per COSMIC
+  set_gtk_icon_theme Papirus-Dark
+  mkdir -p "$TARGET_HOME/.config/cosmic/com.system76.CosmicTk/v1"
+  printf '"Papirus-Dark"' > "$TARGET_HOME/.config/cosmic/com.system76.CosmicTk/v1/icon_theme"
+  chown -R "$TARGET_USER:" "$TARGET_HOME/.config/cosmic"
+
+  # --- sfondo
+  local wall; wall=$(find_wallpaper)
+  mkdir -p /etc/xfdesktop-cosmic
+  if [[ -n $wall ]]; then
+    printf '%s\n' "$wall" > /etc/xfdesktop-cosmic/wallpaper
+    info "sfondo: $wall"
   else
-    warn "BBR non disponibile in questo kernel, uso il controllo di congestione di default"
+    warn "nessuno sfondo trovato: rilancia con WALLPAPER=/percorso/immagine --only=desktop --force"
   fi
 
-  backup_file /etc/sysctl.d/99-net-lowlatency.conf
-  cat > /etc/sysctl.d/99-net-lowlatency.conf <<EOF
-# Ottimizzazioni rete: bassa latenza + buon throughput (TCP e UDP)
-$cc
+  # --- launcher: avvia xfdesktop e lo tiene vivo
+  cat > /usr/local/bin/xfdesktop-cosmic <<'XFD'
+#!/usr/bin/env bash
+# xfdesktop sempre attivo: parte al login, riparte se muore o se cambia lo stato
+# (monitor collegato/scollegato, risveglio dalla sospensione, sblocco schermo)
+exec 8>"${XDG_RUNTIME_DIR:-/tmp}/xfdesktop-cosmic.lock"
+flock -n 8 || exit 0
 
-# TCP
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_notsent_lowat = 16384
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_keepalive_time = 300
-net.ipv4.tcp_rmem = 4096 131072 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
+bin=$(command -v xfdesktop || true)
+[[ -x $HOME/.local/bin/xfdesktop ]] && bin=$HOME/.local/bin/xfdesktop   # build Wayland personale
+[[ -n $bin ]] || { logger -t xfdesktop-cosmic "xfdesktop non trovato"; exit 1; }
+export LD_LIBRARY_PATH="$HOME/.local/lib64:$HOME/.local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# Buffer socket (valgono anche per UDP: giochi, VoIP, QUIC)
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+args=()
+if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
+  if ldd "$bin" 2>/dev/null | grep -q gtk-layer-shell; then
+    export GDK_BACKEND=wayland
+  else
+    export GDK_BACKEND=x11; args+=(--disable-wm-check)
+    logger -t xfdesktop-cosmic "xfdesktop senza supporto Wayland: uso XWayland"
+  fi
+fi
 
-# Code
-net.core.netdev_max_backlog = 16384
-net.core.somaxconn = 4096
+apply_wallpaper() {
+  local img prop mon list
+  img=$(cat /etc/xfdesktop-cosmic/wallpaper 2>/dev/null) || return 0
+  [[ -f $img ]] || return 0
+  list=$(wlr-randr 2>/dev/null | awk '/^[^ ]/{print $1}')
+  [[ -n $list ]] || list=$(xrandr --listmonitors 2>/dev/null | awk 'NR>1{print $4}')
+  {
+    xfconf-query -c xfce4-desktop -l 2>/dev/null | grep -E '/last-image$'
+    for mon in $list; do echo "/backdrop/screen0/monitor${mon}/workspace0/last-image"; done
+  } | sort -u | while read -r prop; do
+    xfconf-query -c xfce4-desktop -p "$prop" -n -t string -s "$img" 2>/dev/null
+    xfconf-query -c xfce4-desktop -p "${prop%last-image}image-style" -n -t int -s 5 2>/dev/null
+  done
+  "$bin" --reload 2>/dev/null || true
+}
+
+start() {
+  "$bin" --quit 2>/dev/null; pkill -u "$UID" -x xfdesktop 2>/dev/null
+  "$bin" "${args[@]}" &
+  pid=$!
+  ( sleep 3; apply_wallpaper ) &
+}
+
+main=$$; want=0; pid=""
+trap 'want=1' USR1
+trap 'pkill -P $main 2>/dev/null' EXIT TERM INT
+
+# eventi: hotplug monitor, risveglio dalla sospensione, sblocco schermo
+udevadm monitor --udev --subsystem-match=drm 2>/dev/null \
+  | while read -r l; do [[ $l == UDEV*" change "* ]] && kill -USR1 "$main"; done &
+dbus-monitor --system \
+    "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" \
+    "type='signal',interface='org.freedesktop.login1.Session',member='Unlock'" 2>/dev/null \
+  | while read -r l; do [[ $l == *"boolean false"* || $l == *"member=Unlock"* ]] && kill -USR1 "$main"; done &
+
+start
+while sleep 1; do
+  if ! kill -0 "$pid" 2>/dev/null; then          # è morto: riparte
+    sleep 2; start
+  elif (( want )); then                           # cambio di stato: riavvio pulito
+    sleep 2; want=0
+    "$bin" --quit 2>/dev/null; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    start
+  fi
+done
+XFD
+  chmod 755 /usr/local/bin/xfdesktop-cosmic
+
+  # --- avvio automatico al login (per tutti gli utenti)
+  cat > /etc/xdg/autostart/xfdesktop-cosmic.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Desktop (xfdesktop)
+Exec=/usr/local/bin/xfdesktop-cosmic
+Terminal=false
+X-GNOME-Autostart-enabled=true
 EOF
-  sysctl --system >/dev/null || warn "sysctl --system ha dato errori (controlla il log)"
+  ok "Papirus + xfdesktop installati, avvio automatico e riavvio a ogni cambio di stato"
+}
 
-  # Wi-Fi: il risparmio energetico è una causa comune di ping alto e picchi di lag
-  mkdir -p /etc/NetworkManager/conf.d
-  backup_file /etc/NetworkManager/conf.d/99-wifi-powersave-off.conf
-  printf '[connection]\nwifi.powersave = 2\n' > /etc/NetworkManager/conf.d/99-wifi-powersave-off.conf
-  systemctl reload NetworkManager 2>/dev/null || true
+# ============================= TEMA COSMIC "GARGANTUA" =======================
+# Palette presa dal buco nero: nero caldo, marroni bruciati, ambra e crema.
+# Pannelli, finestre e popup semitrasparenti con sfocatura; stesso stile su kitty.
+step_theme() {
+  need_user
+  local cfg="$TARGET_HOME/.config/cosmic" ron="$TARGET_HOME/Gargantua.ron" p
 
-  info "congestion control: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo ?)"
-  ok "rete ottimizzata (TCP/UDP) + Wi-Fi power save disattivato"
+  backup_file "$ron"
+  cat > "$ron" <<'RON'
+(
+    palette: Dark((
+        name: "Gargantua",
+        bright_red: "#FFA09AFF", bright_green: "#5EDB8CFF", bright_orange: "#FFA37DFF",
+        gray_1: "#14100DFF", gray_2: "#1E1814FF",
+        neutral_0: "#000000FF", neutral_1: "#050302FF", neutral_2: "#14100DFF",
+        neutral_3: "#2A211CFF", neutral_4: "#463930FF", neutral_5: "#64534AFF",
+        neutral_6: "#866759FF", neutral_7: "#A68B7CFF", neutral_8: "#C7AEA0FF",
+        neutral_9: "#E6D1CDFF", neutral_10: "#FFF8F2FF",
+        accent_blue: "#63D0DFFF", accent_indigo: "#A1C0EBFF", accent_purple: "#E79CFEFF",
+        accent_pink: "#FF9CB1FF", accent_red: "#FDA1A0FF", accent_orange: "#FFAD00FF",
+        accent_yellow: "#F7E062FF", accent_green: "#92CF9CFF", accent_warm_grey: "#CABAB4FF",
+        ext_warm_grey: "#9B8E8AFF", ext_orange: "#FFAD00FF", ext_yellow: "#FEDB40FF",
+        ext_blue: "#48B9C7FF", ext_purple: "#CF7DFFFF", ext_pink: "#F93A83FF", ext_indigo: "#3E88FFFF",
+    )),
+    spacing: (space_none: 0, space_xxxs: 4, space_xxs: 8, space_xs: 12, space_s: 16,
+              space_m: 24, space_l: 32, space_xl: 48, space_xxl: 64, space_xxxl: 128),
+    corner_radii: (radius_0: (0.0, 0.0, 0.0, 0.0), radius_xs: (4.0, 4.0, 4.0, 4.0),
+                   radius_s: (8.0, 8.0, 8.0, 8.0), radius_m: (16.0, 16.0, 16.0, 16.0),
+                   radius_l: (32.0, 32.0, 32.0, 32.0), radius_xl: (160.0, 160.0, 160.0, 160.0)),
+    neutral_tint: Some("#342924"),
+    bg_color: Some("#0A0705FF"),
+    primary_container_bg: Some("#17110EFF"),
+    secondary_container_bg: Some("#221913FF"),
+    text_tint: Some("#F3E3D3"),
+    accent: Some("#E8A05A"),
+    success: Some("#A8C686"),
+    warning: Some("#F2B24C"),
+    destructive: Some("#E5604D"),
+    frosted: High,
+    is_frosted: true,
+    gaps: (0, 8),
+    active_hint: 3,
+    window_hint: Some("#E8A05A"),
+    frosted_windows: true,
+    frosted_system_interface: true,
+    frosted_panel: true,
+    frosted_applets: true,
+    frosted_maximized_apps: false,
+    icon_theme: "Papirus-Dark",
+)
+RON
+
+  # modalità scura fissa
+  mkdir -p "$cfg/com.system76.CosmicTheme.Mode/v1"
+  printf 'true'  > "$cfg/com.system76.CosmicTheme.Mode/v1/is_dark"
+  printf 'false' > "$cfg/com.system76.CosmicTheme.Mode/v1/auto_switch"
+
+  # pannello e dock semitrasparenti
+  for p in Panel Dock; do
+    mkdir -p "$cfg/com.system76.CosmicPanel.$p/v1"
+    backup_file "$cfg/com.system76.CosmicPanel.$p/v1/opacity"
+    printf '0.6' > "$cfg/com.system76.CosmicPanel.$p/v1/opacity"
+  done
+
+
+  # --- kitty: stesso tema, trasparente, con le schede IN ALTO
+  local ts; ts=$(date +%s)
+  mkdir -p "$TARGET_HOME/.config/kitty"
+  [[ -e $TARGET_HOME/.config/kitty/kitty.conf ]] && cp -a "$TARGET_HOME/.config/kitty/kitty.conf" "$TARGET_HOME/.config/kitty/kitty.conf.bak-$ts"
+  cat > "$TARGET_HOME/.config/kitty/kitty.conf" <<'EOF'
+# --- Kitty: tema Gargantua (nero caldo, ambra, crema) ---
+font_family      JetBrains Mono
+font_size        12.0
+shell            zsh
+scrollback_lines 20000
+enable_audio_bell no
+confirm_os_window_close 0
+window_padding_width 8
+remember_window_size yes
+
+# trasparenza + blur
+background_opacity 0.80
+background_blur    40
+
+# cursore animato (scia) e lampeggio morbido
+cursor_shape beam
+cursor_blink_interval 0.5 ease-in-out
+cursor_trail 3
+cursor_trail_decay 0.1 0.4
+
+# schede IN ALTO, sempre visibili, trasparenti
+tab_bar_edge top
+tab_bar_min_tabs 1
+tab_bar_style powerline
+tab_powerline_style slanted
+tab_bar_background none
+tab_bar_margin_width 8
+tab_bar_margin_height 6 0
+tab_title_template "{index}: {title}"
+active_tab_font_style bold
+
+# bordi finestre divise
+active_border_color #E8A05A
+inactive_border_color #463930
+
+# --- Gargantua ---
+foreground #F3E3D3
+background #0A0705
+selection_foreground #0A0705
+selection_background #E8A05A
+url_color #F2B24C
+cursor #E8A05A
+cursor_text_color #0A0705
+color0  #14100D
+color8  #64534A
+color1  #E5604D
+color9  #FF8672
+color2  #A8C686
+color10 #C2DBA2
+color3  #F2B24C
+color11 #FFD07A
+color4  #B7876A
+color12 #D4A98A
+color5  #C47A6B
+color13 #E39A8A
+color6  #D9B99B
+color14 #F0D6BD
+color7  #E6D1CD
+color15 #FFF8F2
+active_tab_foreground   #0A0705
+active_tab_background   #E8A05A
+inactive_tab_foreground #C7AEA0
+inactive_tab_background #2A211C
+EOF
+  chown -R "$TARGET_USER:" "$cfg" "$ron" "$TARGET_HOME/.config/kitty"
+  ok "tema Gargantua creato: $ron + kitty (schede in alto)"
+  warn "ULTIMO PASSAGGIO (un clic): Impostazioni > Desktop > Aspetto > Importa > $ron"
+}
+
+# ============================================== ULTIMO: RIMUOVI ALTRI DE ======
+de_packages() { # nomi dei pacchetti installati che combaciano con i glob
+  rpm -qa --qf '%{NAME}\n' "$@" 2>/dev/null | sort -u \
+    | grep -vE '^(cosmic-.*|xdg-desktop-portal-cosmic|kernel.*|plasma-wayland-protocols|.*-devel|xfdesktop|thunar|thunar-.*|xfconf|garcon|exo|libxfce4.*)$' || true
+}
+
+remove_family() {
+  local label=$1; shift
+  local list=()
+  mapfile -t list < <(de_packages "$@")
+  (( ${#list[@]} )) || { info "$label: nessun pacchetto installato"; return 0; }
+  info "$label: rimuovo ${#list[@]} pacchetti"
+  wait_pkg_lock
+  retry 2 dnf -y remove --setopt=clean_requirements_on_remove=False "${list[@]}" \
+    || warn "$label: rimozione non completata (probabile dipendenza protetta), proseguo"
+}
+
+step_remove_de() {
+  rpm -q cosmic-session cosmic-greeter &>/dev/null \
+    || die "COSMIC non installato: non rimuovo nessun altro DE"
+  systemctl is-enabled cosmic-greeter.service &>/dev/null \
+    || die "cosmic-greeter non abilitato: non rimuovo nessun altro DE"
+
+  # dnf si rifiuta di rimuovere ciò che romperebbe COSMIC, xfdesktop o il sistema
+  mkdir -p /etc/dnf/protected.d
+  printf '%s\n' cosmic-session cosmic-greeter cosmic-comp cosmic-settings cosmic-files cosmic-term \
+    NetworkManager pipewire wireplumber flatpak sudo xfdesktop thunar xfconf > /etc/dnf/protected.d/cosmic-setup.conf
+
+  if [[ $ASSUME_YES -ne 1 ]]; then
+    warn "Sto per RIMUOVERE GNOME, KDE Plasma, Xfce (tranne xfdesktop), MATE, Cinnamon, LXQt/LXDE, Budgie, Deepin, Pantheon."
+    warn "Meglio da una TTY (Ctrl+Alt+F3). Ctrl+C entro 10 secondi per annullare."
+    for i in {10..1}; do printf '%s ' "$i"; sleep 1; done; echo
+  fi
+
+  remove_family "GNOME" gnome-shell 'gnome-shell-extension-*' gdm gnome-session 'gnome-session-*' mutter \
+    gnome-control-center gnome-initial-setup gnome-classic-session gnome-tour gnome-browser-connector \
+    nautilus gnome-terminal gnome-console gnome-text-editor gnome-software
+  remove_family "KDE Plasma" 'plasma-*' 'kwin*' 'sddm*' 'kde-settings*' kdeplasma-addons dolphin konsole \
+    kate kscreen kinfocenter 'kdeconnect*' kde-gtk-config
+  remove_family "Xfce" xfwm4 xfce4-session xfce4-panel xfce4-power-manager xfce4-terminal xfce4-appfinder \
+    xfce4-notifyd xfce4-screensaver xfce4-taskmanager xfce4-screenshooter 'xfce4-*-plugin' lightdm 'lightdm-*'
+  remove_family "MATE" 'mate-*' caja 'caja-*' marco mozo
+  remove_family "Cinnamon" cinnamon 'cinnamon-*' nemo 'nemo-*' muffin cjs
+  remove_family "LXQt/LXDE" 'lxqt-*' 'lxde-*' lxsession pcmanfm pcmanfm-qt lxdm
+  remove_family "Budgie" 'budgie-*'
+  remove_family "Deepin" 'deepin-*' 'dde-*'
+  remove_family "Pantheon" 'pantheon-*'
+
+  info "Window manager puri (Hyprland, i3, Sway, Openbox) NON toccati."
+  # ricontrollo che COSMIC sia ancora integro
+  rpm -q cosmic-session cosmic-greeter &>/dev/null || die "COSMIC danneggiato dalla rimozione! Reinstallalo: dnf group install cosmic-desktop-environment"
+  # ...e che xfdesktop non sia stato portato via insieme agli altri DE
+  rpm -q xfdesktop &>/dev/null || {
+    warn "xfdesktop rimosso insieme agli altri DE: lo reinstallo"
+    DNF_OPTS=(--setopt=install_weak_deps=False); pkgs xfdesktop thunar xfconf
+  }
+  systemctl enable --force cosmic-greeter.service
+  ok "altri DE rimossi"
 }
 
 # ==================================================================== MAIN ====
@@ -778,7 +829,7 @@ main() {
   (( ${#SKIPPED[@]} )) && info "saltati:    ${SKIPPED[*]}"
   (( ${#FAILED[@]} ))  && err  "FALLITI:    ${FAILED[*]}   (rilancia con --only=nome --force)"
   info "log: $LOG | backup dei file modificati: $BACKUP_DIR"
-  info "RIAVVIA il PC per entrare in COSMIC e applicare audio/rete/GRUB."
+  info "RIAVVIA il PC per entrare in COSMIC e applicare audio e desktop."
   (( DO_REBOOT )) && { info "riavvio tra 5s"; sleep 5; systemctl reboot; }
   (( ${#FAILED[@]} == 0 ))
 }
