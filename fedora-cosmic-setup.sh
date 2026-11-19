@@ -14,7 +14,8 @@
 #    --reboot       riavvia alla fine
 #    --list         mostra gli step
 #  Variabili: TARGET_USER, WALLPAPER (percorso dell'immagine di sfondo per xfdesktop),
-#             TERMINAL_BIN (default kitty), XFDESKTOP_VERSION (default 4.20.2)
+#             TERMINAL_BIN (default kitty), XFDESKTOP_VERSION (default: quella installata),
+#             XFDESKTOP_SRC (cartella con i sorgenti di xfdesktop gia' scaricati)
 #
 #  Step (in ordine): repos system cosmic audio gnome-apps backup shell devtools
 #                    desktop menu theme remove-de
@@ -703,28 +704,42 @@ PY
 }
 
 build_xfdesktop_menu() {
-  local ver="${XFDESKTOP_VERSION:-4.20.2}" build="$TARGET_HOME/build" series src file url
-  series=${ver%.*}
-  src="$build/xfdesktop-$ver"
-  file="$src/src/xfdesktop-file-icon-manager.c"
-  url="https://archive.xfce.org/src/xfce/xfdesktop/$series/xfdesktop-$ver.tar.xz"
+  local build="$TARGET_HOME/build" ver="${XFDESKTOP_VERSION:-}" v src="" file url series
 
   # dipendenze di compilazione (quelle mancanti vengono saltate con un avviso)
+  # NB: su Fedora/Nobara il pacchetto di Thunar si chiama "Thunar-devel" (T maiuscola)
   pkgs gcc make gettext pkgconf-pkg-config meson ninja-build gtk3-devel glib2-devel cairo-devel \
        libX11-devel libxfce4util-devel libxfce4ui-devel libxfce4windowing-devel xfconf-devel \
-       garcon-devel exo-devel thunar-devel libnotify-devel gtk-layer-shell-devel libwnck3-devel \
+       garcon-devel exo-devel Thunar-devel libnotify-devel gtk-layer-shell-devel libwnck3-devel \
        xdg-utils
   dnf -y builddep xfdesktop >/dev/null 2>&1 || true   # se i repo sorgenti ci sono, completa le dipendenze
 
   mkdir -p "$build" || return 1
   chown "$TARGET_USER:" "$build"
 
-  if [[ ! -d $src ]]; then
-    retry 3 run_as_user curl -fL --max-time 300 -o "$build/xfdesktop-$ver.tar.xz" "$url" \
-      || { warn "download di xfdesktop $ver fallito ($url)"; return 1; }
-    run_as_user tar -xf "$build/xfdesktop-$ver.tar.xz" -C "$build" \
-      || { warn "estrazione dei sorgenti fallita"; return 1; }
+  # versione: quella installata dal sistema, poi alcune alternative
+  if [[ -z $ver ]]; then ver=$(rpm -q --qf '%{VERSION}' xfdesktop 2>/dev/null) || ver=""; fi
+
+  if [[ -n ${XFDESKTOP_SRC:-} && -f $XFDESKTOP_SRC/src/xfdesktop-file-icon-manager.c ]]; then
+    src=$XFDESKTOP_SRC
+  else
+    for v in $ver 4.20.2 4.20.1 4.20.0; do
+      [[ -n $v ]] || continue
+      if [[ -f $build/xfdesktop-$v/src/xfdesktop-file-icon-manager.c ]]; then
+        src=$build/xfdesktop-$v; ver=$v; break
+      fi
+      series=${v%.*}
+      url="https://archive.xfce.org/src/xfce/xfdesktop/$series/xfdesktop-$v.tar.xz"
+      if run_as_user curl -fL --retry 3 --max-time 300 -o "$build/xfdesktop-$v.tar.xz" "$url" \
+         && run_as_user tar -xf "$build/xfdesktop-$v.tar.xz" -C "$build"; then
+        src=$build/xfdesktop-$v; ver=$v; break
+      fi
+      rm -f "$build/xfdesktop-$v.tar.xz"
+      warn "xfdesktop $v non scaricabile ($url), provo un'altra versione"
+    done
   fi
+  [[ -n $src ]] || { warn "nessun sorgente di xfdesktop disponibile (usa XFDESKTOP_SRC=/percorso/dei/sorgenti)"; return 1; }
+  file="$src/src/xfdesktop-file-icon-manager.c"
   [[ -f $file ]] || { warn "non trovo $file"; return 1; }
 
   [[ -f $file.orig ]] || cp -a "$file" "$file.orig"
@@ -1055,7 +1070,7 @@ step_remove_de() {
 }
 
 # ==================================================================== MAIN ====
-usage() { sed -n '2,21p' "$0" 2>/dev/null || true; }
+usage() { sed -n '2,22p' "$0" 2>/dev/null || true; }
 
 cleanup() { [[ -n $TMP && -d $TMP ]] && rm -rf "$TMP"; }
 
