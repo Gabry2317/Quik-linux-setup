@@ -723,20 +723,50 @@ build_xfdesktop_menu() {
   if [[ -n ${XFDESKTOP_SRC:-} && -f $XFDESKTOP_SRC/src/xfdesktop-file-icon-manager.c ]]; then
     src=$XFDESKTOP_SRC
   else
+    # 1) sorgenti gia' presenti in ~/build, 2) tarball dal sito di Xfce (.xz o .bz2)
+    local ext
     for v in $ver 4.20.2 4.20.1 4.20.0; do
       [[ -n $v ]] || continue
       if [[ -f $build/xfdesktop-$v/src/xfdesktop-file-icon-manager.c ]]; then
         src=$build/xfdesktop-$v; ver=$v; break
       fi
       series=${v%.*}
-      url="https://archive.xfce.org/src/xfce/xfdesktop/$series/xfdesktop-$v.tar.xz"
-      if run_as_user curl -fL --retry 3 --max-time 300 -o "$build/xfdesktop-$v.tar.xz" "$url" \
-         && run_as_user tar -xf "$build/xfdesktop-$v.tar.xz" -C "$build"; then
-        src=$build/xfdesktop-$v; ver=$v; break
-      fi
-      rm -f "$build/xfdesktop-$v.tar.xz"
-      warn "xfdesktop $v non scaricabile ($url), provo un'altra versione"
+      for ext in tar.xz tar.bz2; do
+        url="https://archive.xfce.org/src/xfce/xfdesktop/$series/xfdesktop-$v.$ext"
+        if run_as_user curl -fsSL --retry 2 --max-time 300 -o "$build/xfdesktop-$v.$ext" "$url" \
+           && run_as_user tar -xf "$build/xfdesktop-$v.$ext" -C "$build"; then
+          src=$build/xfdesktop-$v; ver=$v; break 2
+        fi
+        rm -f "$build/xfdesktop-$v.$ext"
+      done
+      warn "xfdesktop $v non scaricabile da archive.xfce.org"
     done
+
+    # 3) sorgente del pacchetto della distro (stessa versione di quella installata)
+    if [[ -z $src ]]; then
+      info "provo con il pacchetto sorgente della distro (dnf download --source)"
+      pkgs cpio
+      local sd="$TMP/srpm" srpm tb tbn
+      mkdir -p "$sd"
+      if dnf -y download --source xfdesktop --destdir "$sd" >/dev/null 2>&1; then
+        srpm=$(ls "$sd"/xfdesktop-*.src.rpm 2>/dev/null | head -1)
+        if [[ -n $srpm ]]; then
+          ( cd "$sd" && rpm2cpio "$srpm" | cpio -idm >/dev/null 2>&1 )
+          tb=$(ls "$sd"/xfdesktop-*.tar.* 2>/dev/null | head -1)
+          if [[ -n $tb ]]; then
+            tbn=$(basename "$tb")
+            cp "$tb" "$build/$tbn" && chown "$TARGET_USER:" "$build/$tbn"
+            run_as_user tar -xf "$build/$tbn" -C "$build"
+            v=${tbn#xfdesktop-}; v=${v%.tar.*}
+            if [[ -f $build/xfdesktop-$v/src/xfdesktop-file-icon-manager.c ]]; then
+              src=$build/xfdesktop-$v; ver=$v
+            fi
+          fi
+        fi
+      else
+        warn "dnf download --source non riuscito (repo sorgenti non attivi?)"
+      fi
+    fi
   fi
   [[ -n $src ]] || { warn "nessun sorgente di xfdesktop disponibile (usa XFDESKTOP_SRC=/percorso/dei/sorgenti)"; return 1; }
   file="$src/src/xfdesktop-file-icon-manager.c"
