@@ -13,20 +13,22 @@
 #    --yes | -y     niente conto alla rovescia prima di rimuovere i DE
 #    --reboot       riavvia alla fine
 #    --list         mostra gli step
-#  Variabili: TARGET_USER, WALLPAPER (percorso dell'immagine di sfondo per xfdesktop)
+#  Variabili: TARGET_USER, WALLPAPER (percorso dell'immagine di sfondo per xfdesktop),
+#             TERMINAL_BIN (default kitty), XFDESKTOP_VERSION (default 4.20.2)
 #
 #  Step (in ordine): repos system cosmic audio gnome-apps backup shell devtools
-#                    desktop theme remove-de
+#                    desktop menu theme remove-de
 # =============================================================================
 set -Eeuo pipefail
 
 LOG=/var/log/fedora-cosmic-setup.log
 STATE_DIR=/var/lib/fedora-cosmic-setup
 BACKUP_DIR=/var/backups/fedora-cosmic-setup/$(date +%Y%m%d-%H%M%S)
-STEPS=(repos system cosmic audio gnome-apps backup shell devtools desktop theme remove-de)
+STEPS=(repos system cosmic audio gnome-apps backup shell devtools desktop menu theme remove-de)
 
 SKIP="${SKIP:-}"; ONLY="${ONLY:-}"; FORCE=0; ASSUME_YES=0; DO_REBOOT=0
 TARGET_USER="${TARGET_USER:-}"; TARGET_HOME=""
+TERMINAL_BIN="${TERMINAL_BIN:-kitty}"
 SKIPFLAG=""
 TMP=""
 OK=(); FAILED=(); SKIPPED=()
@@ -590,6 +592,269 @@ EOF
   ok "Papirus + xfdesktop installati, avvio automatico e riavvio a ogni cambio di stato"
 }
 
+# ====== MENU DESKTOP PERSONALIZZATO + KITTY + COSMIC FILES (xfdesktop) ==========
+# Compila xfdesktop in ~/.local con il menu del tasto destro rifatto
+# (Crea documento / cartella / collegamento URL, Impostazioni di COSMIC) e imposta
+# kitty come terminale e COSMIC Files come file manager per le cartelle del desktop.
+# Il lanciatore xfdesktop-cosmic usa gia' ~/.local/bin/xfdesktop se esiste.
+write_menu_patch() {  # $1 = file di destinazione
+  cat > "$1" <<'PY'
+import re, sys, pathlib
+
+path = pathlib.Path(sys.argv[1])
+s = path.read_text()
+
+if "custom_cmd_activate" in s:
+    print("menu xfdesktop: gia' patchato, salto.")
+    sys.exit(0)
+
+# --- funzione di supporto
+HELPER = '''static void
+custom_cmd_activate(GtkMenuItem *mi, gpointer user_data)
+{
+    const gchar *cmd = g_object_get_data(G_OBJECT(mi), "custom-cmd");
+    if (cmd != NULL) {
+        g_spawn_command_line_async(cmd, NULL);
+    }
+}
+
+'''
+
+pos = None
+for pat in (r'^static[^\n]*\n(?=add_menu_item\()',
+            r'^static[^\n]*\badd_menu_item\(',
+            r'^static '):
+    m = re.search(pat, s, re.M)
+    if m:
+        pos = m.start()
+        break
+if pos is None:
+    sys.exit("ERRORE: non trovo dove inserire la funzione di supporto")
+
+# --- riordino delle voci "Crea ..."
+anchor = 'g_object_set_data(G_OBJECT(create_empty_file_mi), DEST_COL_KEY, GINT_TO_POINTER(dest_col));'
+m_anchor = re.search(r'^([ \t]*)' + re.escape(anchor) + r'[ \t]*$', s, re.M)
+if not m_anchor or s.count(anchor) != 1:
+    sys.exit("ERRORE: ancora 'create_empty_file_mi' non trovata (o non unica)")
+ind = m_anchor.group(1)
+REORDER = (
+    "\n\n" + ind + "/* menu personalizzato: niente 'Crea avviatore', ordine documento/cartella/collegamento */\n"
+    + ind + "gtk_widget_destroy(create_launcher_mi);\n"
+    + ind + "gtk_menu_reorder_child(GTK_MENU(menu), tmpl_mi, 0);\n"
+    + ind + "gtk_menu_reorder_child(GTK_MENU(menu), create_folder_mi, 1);\n"
+    + ind + "gtk_menu_reorder_child(GTK_MENU(menu), create_url_mi, 2);"
+)
+
+# --- impostazioni COSMIC
+settings_re = re.compile(
+    r'^([ \t]*)add_menu_item\(menu,\s*_\("Desktop _Settings\.\.\."\),\s*'
+    r'g_themed_icon_new\("preferences-desktop-wallpaper"\),\s*'
+    r'G_CALLBACK\(xfdesktop_settings_launch\),\s*mdata\);', re.M)
+m_set = settings_re.search(s)
+if not m_set:
+    sys.exit("ERRORE: blocco 'Desktop Settings' non trovato in questo formato")
+i2 = m_set.group(1)
+SETTINGS = (
+    i2 + 'GtkWidget *cosmic_mi = add_menu_item(menu,\n'
+    + i2 + '                                     "Impostazioni di COSMIC...",\n'
+    + i2 + '                                     g_themed_icon_new("preferences-system"),\n'
+    + i2 + '                                     G_CALLBACK(custom_cmd_activate),\n'
+    + i2 + '                                     mdata);\n'
+    + i2 + 'g_object_set_data(G_OBJECT(cosmic_mi), "custom-cmd", "cosmic-settings");'
+)
+
+# applico dal fondo verso l'alto per non sfalsare le posizioni
+edits = sorted([
+    (m_set.start(), m_set.end(), SETTINGS),
+    (m_anchor.end(), m_anchor.end(), REORDER),
+    (pos, pos, HELPER),
+], key=lambda e: e[0], reverse=True)
+for a, b, text in edits:
+    s = s[:a] + text + s[b:]
+
+path.write_text(s)
+print("menu xfdesktop: patch applicata.")
+PY
+}
+
+write_uca_patch() {  # $1 = file di destinazione
+  cat > "$1" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+path, term = sys.argv[1], sys.argv[2]
+tree = ET.parse(path)
+changed = False
+for action in tree.getroot().findall("action"):
+    name = (action.findtext("name") or "").lower()
+    cmd = action.find("command")
+    if cmd is None:
+        continue
+    text = cmd.text or ""
+    if "terminal" in name or "TerminalEmulator" in text or "cosmic-term" in text:
+        cmd.text = (term + " --directory %f") if term == "kitty" else term
+        changed = True
+if changed:
+    tree.write(path, encoding="UTF-8", xml_declaration=True)
+    print("uca.xml aggiornato: 'Open Terminal Here' usa " + term)
+else:
+    print("uca.xml: nessuna azione terminale trovata, non modificato")
+PY
+}
+
+build_xfdesktop_menu() {
+  local ver="${XFDESKTOP_VERSION:-4.20.2}" build="$TARGET_HOME/build" series src file url
+  series=${ver%.*}
+  src="$build/xfdesktop-$ver"
+  file="$src/src/xfdesktop-file-icon-manager.c"
+  url="https://archive.xfce.org/src/xfce/xfdesktop/$series/xfdesktop-$ver.tar.xz"
+
+  # dipendenze di compilazione (quelle mancanti vengono saltate con un avviso)
+  pkgs gcc make gettext pkgconf-pkg-config meson ninja-build gtk3-devel glib2-devel cairo-devel \
+       libX11-devel libxfce4util-devel libxfce4ui-devel libxfce4windowing-devel xfconf-devel \
+       garcon-devel exo-devel thunar-devel libnotify-devel gtk-layer-shell-devel libwnck3-devel \
+       xdg-utils
+  dnf -y builddep xfdesktop >/dev/null 2>&1 || true   # se i repo sorgenti ci sono, completa le dipendenze
+
+  mkdir -p "$build" || return 1
+  chown "$TARGET_USER:" "$build"
+
+  if [[ ! -d $src ]]; then
+    retry 3 run_as_user curl -fL --max-time 300 -o "$build/xfdesktop-$ver.tar.xz" "$url" \
+      || { warn "download di xfdesktop $ver fallito ($url)"; return 1; }
+    run_as_user tar -xf "$build/xfdesktop-$ver.tar.xz" -C "$build" \
+      || { warn "estrazione dei sorgenti fallita"; return 1; }
+  fi
+  [[ -f $file ]] || { warn "non trovo $file"; return 1; }
+
+  [[ -f $file.orig ]] || cp -a "$file" "$file.orig"
+  write_menu_patch "$TMP/menu-patch.py"
+  python3 "$TMP/menu-patch.py" "$file" || { warn "patch del menu non applicabile a xfdesktop $ver"; return 1; }
+  chown "$TARGET_USER:" "$file"
+
+  info "compilo xfdesktop $ver in $TARGET_HOME/.local (qualche minuto)"
+  run_as_user bash -c '
+    set -e
+    cd "$1"
+    export PKG_CONFIG_PATH="$HOME/.local/lib64/pkgconfig:$HOME/.local/lib/pkgconfig:$HOME/.local/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    if [ -x ./configure ]; then
+      [ -f Makefile ] || ./configure --prefix="$HOME/.local"
+      make -j"$(nproc)"
+      make install
+    elif [ -f meson.build ]; then
+      [ -d build ] || meson setup build --prefix="$HOME/.local"
+      ninja -C build
+      ninja -C build install
+    else
+      echo "nessun sistema di build riconosciuto" >&2; exit 1
+    fi
+  ' _ "$src" || { warn "compilazione di xfdesktop fallita"; return 1; }
+
+  if ! grep -qs 'define HAVE_THUNARX' "$src/config.h" "$src/build/config.h"; then
+    warn "xfdesktop compilato senza supporto Thunar (thunar-devel mancante?): niente 'Open Terminal Here' nel menu"
+  fi
+  [[ -x $TARGET_HOME/.local/bin/xfdesktop ]] || { warn "xfdesktop non risulta installato in ~/.local/bin"; return 1; }
+  return 0
+}
+
+set_helper_rc() {  # set_helper_rc CHIAVE VALORE  (~/.config/xfce4/helpers.rc)
+  local rc="$TARGET_HOME/.config/xfce4/helpers.rc"
+  touch "$rc"
+  if grep -q "^$1=" "$rc"; then
+    sed -i "s|^$1=.*|$1=$2|" "$rc"
+  else
+    echo "$1=$2" >> "$rc"
+  fi
+}
+
+configure_terminal_and_files() {
+  local term="${TERMINAL_BIN:-kitty}" hd="$TARGET_HOME/.local/share/xfce4/helpers"
+  mkdir -p "$hd" "$TARGET_HOME/.config/xfce4" "$TARGET_HOME/.config/Thunar" \
+           "$TARGET_HOME/.local/share/dbus-1/services"
+  command -v "$term" >/dev/null 2>&1 || warn "$term non trovato nel PATH"
+
+  # --- terminale predefinito di XFCE (exo-open --launch TerminalEmulator)
+  rm -f "$hd/cosmic-term.desktop"
+  cat > "$hd/$term.desktop" <<EOF
+[Desktop Entry]
+NoDisplay=true
+Version=1.0
+Type=X-XFCE-Helper
+X-XFCE-Category=TerminalEmulator
+X-XFCE-CommandsWithParameter=$term "%s"
+X-XFCE-Commands=$term
+Icon=utilities-terminal
+Name=$term
+EOF
+  set_helper_rc TerminalEmulator "$term"
+
+  # --- azione "Open Terminal Here" di Thunar (quella nel menu del desktop)
+  local uca="$TARGET_HOME/.config/Thunar/uca.xml"
+  if [[ ! -f $uca && -f /etc/xdg/Thunar/uca.xml ]]; then cp /etc/xdg/Thunar/uca.xml "$uca"; fi
+  if [[ -f $uca ]]; then
+    backup_file "$uca"
+    write_uca_patch "$TMP/uca-patch.py"
+    python3 "$TMP/uca-patch.py" "$uca" "$term" || warn "uca.xml non modificato"
+  else
+    warn "uca.xml non trovato: l'azione di Thunar non e' stata toccata"
+  fi
+
+  # --- COSMIC Files per le cartelle
+  local cf="" d n
+  for d in /usr/share/applications /usr/local/share/applications "$TARGET_HOME/.local/share/applications" \
+           /var/lib/flatpak/exports/share/applications; do
+    for n in com.system76.CosmicFiles.desktop cosmic-files.desktop; do
+      if [[ -f $d/$n ]]; then cf=$n; break 2; fi
+    done
+  done
+  if [[ -n $cf ]]; then
+    run_as_user xdg-mime default "$cf" inode/directory x-directory/normal \
+      || warn "xdg-mime non e' riuscito a impostare $cf"
+    info "cartelle -> $cf"
+  else
+    warn "COSMIC Files non trovato: handler cartelle non impostato"
+  fi
+  cat > "$hd/cosmic-files.desktop" <<'EOF'
+[Desktop Entry]
+NoDisplay=true
+Version=1.0
+Type=X-XFCE-Helper
+X-XFCE-Category=FileManager
+X-XFCE-CommandsWithParameter=cosmic-files "%s"
+X-XFCE-Commands=cosmic-files
+Icon=system-file-manager
+Name=COSMIC Files
+EOF
+  set_helper_rc FileManager cosmic-files
+
+  # --- xfdesktop prova prima Thunar via D-Bus: lo disattivo per questo utente
+  #     (Thunar resta usabile avviandolo a mano)
+  local svc
+  for svc in org.xfce.FileManager org.xfce.Thunar; do
+    cat > "$TARGET_HOME/.local/share/dbus-1/services/$svc.service" <<EOF
+[D-BUS Service]
+Name=$svc
+Exec=/usr/bin/false
+EOF
+  done
+
+  chown -R "$TARGET_USER:" "$TARGET_HOME/.config/xfce4" "$TARGET_HOME/.config/Thunar" \
+        "$TARGET_HOME/.local/share/xfce4" "$TARGET_HOME/.local/share/dbus-1"
+}
+
+step_menu() {
+  need_user
+  local built=1
+  build_xfdesktop_menu || built=0
+  configure_terminal_and_files
+  if (( built )); then
+    ok "menu desktop personalizzato + ${TERMINAL_BIN:-kitty} + COSMIC Files (effettivi al prossimo login)"
+  else
+    warn "menu personalizzato NON installato: resta xfdesktop di sistema. Rilancia: --only=menu --force"
+    return 1
+  fi
+}
+
 # ============================= TEMA COSMIC "GARGANTUA" =======================
 # Palette presa dal buco nero: nero caldo, marroni bruciati, ambra e crema.
 # Pannelli, finestre e popup semitrasparenti con sfocatura; stesso stile su kitty.
@@ -790,7 +1055,7 @@ step_remove_de() {
 }
 
 # ==================================================================== MAIN ====
-usage() { sed -n '2,20p' "$0" 2>/dev/null || true; }
+usage() { sed -n '2,21p' "$0" 2>/dev/null || true; }
 
 cleanup() { [[ -n $TMP && -d $TMP ]] && rm -rf "$TMP"; }
 
