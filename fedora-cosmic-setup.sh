@@ -711,7 +711,7 @@ build_xfdesktop_menu() {
   pkgs gcc make gettext pkgconf-pkg-config meson ninja-build gtk3-devel glib2-devel cairo-devel \
        libX11-devel libxfce4util-devel libxfce4ui-devel libxfce4windowing-devel xfconf-devel \
        garcon-devel exo-devel Thunar-devel libnotify-devel gtk-layer-shell-devel libwnck3-devel \
-       xdg-utils
+       libyaml-devel xdg-utils
   dnf -y builddep xfdesktop >/dev/null 2>&1 || true   # se i repo sorgenti ci sono, completa le dipendenze
 
   mkdir -p "$build" || return 1
@@ -783,8 +783,13 @@ build_xfdesktop_menu() {
     cd "$1"
     export PKG_CONFIG_PATH="$HOME/.local/lib64/pkgconfig:$HOME/.local/lib/pkgconfig:$HOME/.local/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     if [ -x ./configure ]; then
-      [ -f Makefile ] || ./configure --prefix="$HOME/.local"
+      ./configure --prefix="$HOME/.local"
       make -j"$(nproc)"
+      # senza icone-file (libyaml-devel mancante) il menu non c e e il desktop resterebbe vuoto: non installo
+      if ! ls src/*file-icon-manager*.o >/dev/null 2>&1; then
+        echo "xfdesktop compilato SENZA supporto icone-file (manca libyaml-devel?)" >&2
+        exit 1
+      fi
       make install
     elif [ -f meson.build ]; then
       [ -d build ] || meson setup build --prefix="$HOME/.local"
